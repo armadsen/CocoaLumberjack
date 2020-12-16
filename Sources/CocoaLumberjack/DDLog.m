@@ -13,12 +13,9 @@
 //   to endorse or promote products derived from this software without specific
 //   prior written permission of Deusty, LLC.
 
-// Disable legacy macros
-#ifndef DD_LEGACY_MACROS
-    #define DD_LEGACY_MACROS 0
+#if !__has_feature(objc_arc)
+#error This file must be compiled with ARC. Use -fobjc-arc flag (or convert project to ARC).
 #endif
-
-#import <CocoaLumberjack/DDLog.h>
 
 #import <pthread.h>
 #import <objc/runtime.h>
@@ -31,10 +28,12 @@
     #import <AppKit/NSApplication.h>
 #endif
 
-
-#if !__has_feature(objc_arc)
-#error This file must be compiled with ARC. Use -fobjc-arc flag (or convert project to ARC).
+// Disable legacy macros
+#ifndef DD_LEGACY_MACROS
+    #define DD_LEGACY_MACROS 0
 #endif
+
+#import <CocoaLumberjack/DDLog.h>
 
 // We probably shouldn't be using DDLog() statements within the DDLog implementation.
 // But we still want to leave our log statements for any future debugging,
@@ -522,6 +521,9 @@ static NSUInteger _numProcessors;
 }
 
 - (void)flushLog {
+    NSAssert(!dispatch_get_specific(GlobalLoggingQueueIdentityKey),
+             @"This method shouldn't be run on the logging thread/queue that make flush fast enough");
+    
     dispatch_sync(_loggingQueue, ^{ @autoreleasepool {
         [self lt_flush];
     } });
@@ -1045,7 +1047,7 @@ NSString * __nullable DDExtractFileNameWithoutExtension(const char *filePath, BO
         _function = copyFunction ? [function copy] : function;
 
         _line         = line;
-        _tag          = tag;
+        _representedObject = tag;
         _options      = options;
         _timestamp    = timestamp ?: [NSDate new];
 
@@ -1067,11 +1069,51 @@ NSString * __nullable DDExtractFileNameWithoutExtension(const char *filePath, BO
 
         // Try to get the current queue's label
         _queueLabel = [[NSString alloc] initWithFormat:@"%s", dispatch_queue_get_label(DISPATCH_CURRENT_QUEUE_LABEL)];
-
-        if (@available(macOS 10.10, iOS 8.0, *))
-            _qos = (NSUInteger) qos_class_self();
+        _qos = (NSUInteger) qos_class_self();
     }
     return self;
+}
+
+- (BOOL)isEqual:(id)other {
+    if (other == self) {
+        return YES;
+    } else if (![super isEqual:other] || ![other isKindOfClass:[self class]]) {
+        return NO;
+    } else {
+        __auto_type otherMsg = (DDLogMessage *)other;
+        return [otherMsg->_message isEqualToString:_message]
+        && otherMsg->_level == _level
+        && otherMsg->_flag == _flag
+        && otherMsg->_context == _context
+        && [otherMsg->_file isEqualToString:_file]
+        && [otherMsg->_fileName isEqualToString:_fileName]
+        && [otherMsg->_function isEqualToString:_function]
+        && otherMsg->_line == _line
+        && (([otherMsg->_representedObject respondsToSelector:@selector(isEqual:)] && [otherMsg->_representedObject isEqual:_representedObject]) || otherMsg->_representedObject == _representedObject)
+        && otherMsg->_options == _options
+        && [otherMsg->_timestamp isEqualToDate:_timestamp]
+        && [otherMsg->_threadID isEqualToString:_threadID] // If the thread ID is the same, the name will likely be the same as well.
+        && [otherMsg->_queueLabel isEqualToString:_queueLabel]
+        && otherMsg->_qos == _qos;
+    }
+}
+
+- (NSUInteger)hash {
+    return [super hash]
+    ^ _message.hash
+    ^ _level
+    ^ _flag
+    ^ _context
+    ^ _file.hash
+    ^ _fileName.hash
+    ^ _function.hash
+    ^ _line
+    ^ ([_representedObject respondsToSelector:@selector(hash)] ? [_representedObject hash] : 0)
+    ^ _options
+    ^ _timestamp.hash
+    ^ _threadID.hash
+    ^ _queueLabel.hash
+    ^ _qos;
 }
 
 - (id)copyWithZone:(NSZone * __attribute__((unused)))zone {
@@ -1085,7 +1127,7 @@ NSString * __nullable DDExtractFileNameWithoutExtension(const char *filePath, BO
     newMessage->_fileName = _fileName;
     newMessage->_function = _function;
     newMessage->_line = _line;
-    newMessage->_tag = _tag;
+    newMessage->_representedObject = _representedObject;
     newMessage->_options = _options;
     newMessage->_timestamp = _timestamp;
     newMessage->_threadID = _threadID;
@@ -1094,6 +1136,11 @@ NSString * __nullable DDExtractFileNameWithoutExtension(const char *filePath, BO
     newMessage->_qos = _qos;
 
     return newMessage;
+}
+
+// ensure compatibility even when build with DD_LEGACY_MESSAGE_TAG to 0.
+- (id)tag {
+    return _representedObject;
 }
 
 @end
